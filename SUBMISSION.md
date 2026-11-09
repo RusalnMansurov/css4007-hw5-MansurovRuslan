@@ -145,14 +145,45 @@ All service data and instructions are fictional. Ticket drafts are local and not
 
 ## Part 3 — Memory
 
-**Not yet implemented or verified.** Explain checkpointer, persistent user-preference storage, `thread_id` versus user ID, and the difference between retrieval from `helpdesk.json` and remembered preferences after implementing them.
+### Memory design and storage
+
+I extended the Part 2 helpdesk into `part3.py` using two different kinds of persistent memory:
+
+1. **Conversation history:** `SqliteSaver` from `langgraph-checkpoint-sqlite` stores LangGraph checkpoints in `outputs/memory/checkpoints.sqlite`. The graph is compiled with `builder.compile(checkpointer=checkpointer)`, and `MessagesState` accumulates user, assistant, and tool messages across invocations of the same conversation. A new Python process can reopen the SQLite database and resume that history.
+2. **User preferences:** `load_preferences(user_id)` and `save_preference(user_id, key, value)` read and write `outputs/memory/preferences.json`. The supported keys are `language` and `response_style`. Preferences are injected into the model's system message, so they can influence replies in a new conversation without copying the old conversation transcript.
+
+Both files contain local test state and should remain outside Git. They are not university records or live service data. The `set-pref` command explicitly saves a preference; this implementation does not automatically extract preferences from free-form user messages.
+
+### `thread_id` versus `user_id`
+
+`user_id` identifies the owner of preferences and the conversation; `thread_id` identifies an individual conversation. A user can have multiple threads, while each thread retains its own message history. To prevent two demo users with the same supplied thread name from sharing checkpoints, the application constructs the SQLite checkpoint key with `json.dumps([user_id, thread_id])`. This is a logical isolation mechanism for the demo, **not** authentication or access control: the command-line caller still supplies the user ID.
+
+For ticket drafts, the application passes the original `user_id` and `thread_id` through runtime configuration to `create_ticket`, rather than allowing the model to choose those identity fields. The underlying `prepare_ticket` function creates a local JSON draft, never submits a real support request.
+
+### Tests and observed behavior
 
 | Situation | Command used | Log file | What happened |
 | --- | --- | --- | --- |
-| Refer to an earlier message | Pending | Pending | Not tested yet |
-| Close, restart and resume | Pending | Pending | Not tested yet |
-| Same user, new conversation | Pending | Pending | Not tested yet |
-| Different user | Pending | Pending | Not tested yet |
+| Refer to an earlier message | `python part3.py demo-user-a shared-thread "What problem did I mention earlier?"` after a Wi-Fi message in the same thread | Terminal trace; repeatable with `outputs/part3/memory_first.txt` and `memory_restart.txt` | The assistant recalled that the user's laptop could not connect to Wi-Fi. |
+| Close, restart and resume | Run `python part3.py demo-user-a thread-001 "Hi! My Wi-Fi is not working. What should I do?"`, then run a separate Python process with `python part3.py demo-user-a thread-001 "What was my previous problem?"` | `outputs/part3/memory_first.txt`, `outputs/part3/memory_restart.txt` (new reproduction) | The original terminal test showed 8 saved messages after the first run and 10 after the second; the assistant recalled the Wi-Fi problem. |
+| Same user, new conversation | `python part3.py set-pref demo-user-a language "Russian"`, then `python part3.py demo-user-a thread-002 "Hello! Can you explain what you can help me with?"` | `outputs/part3/memory_preferences.txt` (new reproduction) | User A's saved preference was `{'language': 'Russian'}`. The assistant answered in Russian despite the English question; the new thread initially contained only 2 messages. |
+| Different user | `python part3.py demo-user-b thread-003 "Hello! What can you help me with?"` | `outputs/part3/memory_isolation.txt` (new reproduction) | User B had empty preferences and received an English reply. With the same `shared-thread` label, B could not recall A's Wi-Fi problem, while A could. |
+
+**Same-thread isolation trace:** A's `shared-thread` history contained 6 messages after the first Wi-Fi request and 8 after the follow-up. B's independently namespaced `shared-thread` contained 2 messages and answered that no earlier problem had been mentioned. This confirmed isolation for the tested demo identities.
+
+**Ticket identity trace:** In the `ticket-final-002` run, the model called `get_service_status(service="wifi")`, received `operational`, then requested `create_ticket`. The tool normalized the model's category `Wi-Fi connectivity` to `wifi` and saved `DRAFT-6c6b503b` with `user_id="demo-user-a"`, `thread_id="ticket-final-002"`, `status="draft"`, and `submitted=false`. An earlier attempt (`ticket-final-001`) failed because that category was not accepted; the normalization fix resolved it. The successful ticket trace was observed in the terminal, not yet saved as a Part 3 log file.
+
+### Retrieval versus memory
+
+`find_instructions` retrieves fixed troubleshooting instructions from `data/helpdesk.json` when the agent calls the tool. This is reference data shared by the fictional helpdesk, not something the agent learned about an individual. By contrast, SQLite checkpoints retain a particular conversation's messages, and `preferences.json` stores a user's selected response language or style across different threads. The LLM decides how to respond using the retrieved reference data and the relevant saved context.
+
+### Limitations
+
+- The preference JSON file is suitable for a local single-process demonstration, not concurrent multi-user writes; no locking or transactional updates are implemented.
+- Caller-supplied `user_id` is not authenticated, so the namespace convention alone is not a production security boundary.
+- Tool choice and wording are model-dependent. In an earlier run, `find_instructions` first received an unsupported topic and then retried with `wifi`.
+- Only local fictional service statuses and draft tickets are used. No real ticket is submitted, and the secret-detection logic in the underlying ticket tool is limited.
+- These are manual execution checks; automated persistence and isolation tests are planned for Part 4.
 
 ## Part 4 — Running and checking my work
 
