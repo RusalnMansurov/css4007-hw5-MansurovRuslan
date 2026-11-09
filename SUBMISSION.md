@@ -183,23 +183,70 @@ For ticket drafts, the application passes the original `user_id` and `thread_id`
 - Caller-supplied `user_id` is not authenticated, so the namespace convention alone is not a production security boundary.
 - Tool choice and wording are model-dependent. In an earlier run, `find_instructions` first received an unsupported topic and then retried with `wifi`.
 - Only local fictional service statuses and draft tickets are used. No real ticket is submitted, and the secret-detection logic in the underlying ticket tool is limited.
-- These are manual execution checks; automated persistence and isolation tests are planned for Part 4.
+- The Part 3 behavior was first checked manually; Part 4 now adds four automated persistence and isolation tests using a deterministic fake model.
 
-## Part 4 — Running and checking my work
+## Part 4 — Testing, reproducibility, and CI
 
-**Not yet implemented or verified.** Document the tested Python version, pinned dependencies, exact README run instructions, memory reset procedure, automated routing/tool/persistence/isolation tests, what each test detects, and GitHub Actions. Tests must run without a private API key, using a clearly labeled fake model when needed.
+### Environment and setup
+
+The project was tested locally with Python **3.13.1**. The direct dependencies are pinned in `requirements.txt`:
+
+```text
+langchain-openai==1.7.4
+langgraph==1.2.19
+langgraph-checkpoint-sqlite==3.1.3
+python-dotenv==1.2.4
+pytest==9.2.0
+```
+
+`README.md` documents creating a virtual environment, installing dependencies, configuring `.env` for model-backed demos, running Parts 1–3, running the tests, and resetting local memory. The `.env` file and local SQLite/preferences data should not be committed.
+
+### Automated test coverage
+
+| Test file | Number of tests | What the tests detect |
+| --- | ---: | --- |
+| `tests/test_part1.py` | 9 | Incorrect Wi-Fi/password/other routing, case sensitivity, failure to clarify mixed-topic requests, and wrong clarification reply. |
+| `tests/test_tools.py` | 8 | Incorrect instruction retrieval, service status profiles (`normal`, `wifi_outage`, `status_unavailable`), and missing ticket validation for steps, labeled secrets, or invalid categories. |
+| `tests/test_memory.py` | 4 | Failure to persist history when SQLite is reopened, preference persistence across threads, preference leakage between users, and conversation leakage between users sharing a thread label. |
+| **Total** | **21** | **All passed locally.** |
+
+The memory tests use a clearly labeled deterministic `FakeModel` and temporary SQLite/JSON files. The tool and routing tests use local fixtures. **The automated tests do not make OpenAI API calls or require a real API key.** The persistence test reopens the database to simulate restarting the application; it does not launch a separate operating-system process. The tests cover selected behaviors, not every possible model/tool error path.
+
+### Executed results
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pytest tests/ -q
+```
+
+The pinned dependencies were already satisfied in the local virtual environment. Final observed output on Windows / Python 3.13.1:
+
+```text
+..................... [100%]
+21 passed in 1.65s
+```
+
+### GitHub Actions
+
+`.github/workflows/tests.yml` defines `HW5 Automated Tests`, triggered on `push` and `pull_request`. It checks out the repository, installs Python 3.13 and the pinned dependencies, then runs `python -m pytest tests/ -v`. It supplies a **placeholder**, not a private OpenAI API key, and disables LangSmith tracing.
+
+The workflow configuration has been inspected locally; **a successful GitHub-hosted CI run has not yet been confirmed**. After pushing, verify the workflow in the repository's **Actions** tab.
+
+### Reproducibility and limitations
+
+All helpdesk instructions, service statuses, and tickets are fictional. Ticket creation writes a local draft (`submitted=false`) rather than sending a real request. Basic secret checks are not comprehensive. `user_id` is supplied by the command-line caller and is not authenticated, so the isolation scheme is suitable for demonstration, not production authorization. SQLite and the preference JSON are local persistence mechanisms.
 
 ## Choices and limitations
 
 - Part 1 uses Python, LangGraph, and the supplied local `data/helpdesk.json` fixture.
 - The demonstration is a fictional helpdesk; no real university services are queried and no real tickets are submitted.
 - Part 1's routing is deterministic and keyword-based; it cannot interpret arbitrary user intent.
-- Part 2 model choice and Part 3 persistence implementation have not yet been selected or demonstrated.
+- Part 2 uses a tool-calling OpenAI model; Part 3 uses SQLite checkpoints and a JSON preference store. Both were demonstrated locally, while the automated suite uses a fake model.
 - Do not commit API keys, `.env`, virtual environments, or live memory databases.
 
 ## Supplied scenarios — my actual results
 
-The initial updated graph was executed for four supplied messages. The S01–S05 scenario labels below are aligned with those Part 1 cases; verify the scenario fixture's exact reset and restart instructions when running the full S01–S14 suite. Do not treat an uninspected log as verified evidence.
+The initial updated graph was executed for four supplied messages. The S01–S05 scenario labels below are aligned with those Part 1 cases. Later rows summarize observed overlapping behavior; they do not certify that each scenario was executed end-to-end exactly as written in the original scenario fixture. S14 remains unverified. Do not treat an uninspected log as verified evidence.
 
 | Scenario | Command or manual steps | Log file | What happened / what I changed |
 | --- | --- | --- | --- |
@@ -208,12 +255,12 @@ The initial updated graph was executed for four supplied messages. The S01–S05
 | S03 — Unsupported request | Same initial run | `outputs/part1_updated.txt` (verify) | Console run: `read_request -> other_help`. |
 | S04 — Two topics before the graph change | `python part1.py` (original version) | `outputs/part1_original.txt` (verify) | Expected Wi-Fi-first routing; original log not inspected here. |
 | S05 — Two topics after adding clarification | `python part1_updated.py` | `outputs/part1_updated.txt` (verify) | Console run: `read_request -> clarify_problem`; asks which issue first. |
-| S06 — Instructions then local ticket | Pending | Pending | Not tested yet |
-| S07 — The same request during a Wi-Fi outage | Pending | Pending | Not tested yet |
-| S08 — Status source unavailable | Pending | Pending | Not tested yet |
-| S09 — Missing ticket details | Pending | Pending | Not tested yet |
-| S10 — Use the current conversation | Pending | Pending | Not tested yet |
-| S11 — Persist and recall after restart | Pending | Pending | Not tested yet |
-| S12 — Preference across threads without replay | Pending | Pending | Not tested yet |
-| S13 — Do not share memory between users | Pending | Pending | Not tested yet |
+| S06 — Instructions then local ticket | Part 2 tool-calling demo and direct tools | `outputs/part2/` (individual log availability should be checked) | Instruction retrieval and a local ticket draft were observed, though not necessarily in one uninterrupted scenario run. |
+| S07 — The same request during a Wi-Fi outage | `$env:STATUS_PROFILE="wifi_outage"; python part2.py` | `outputs/part2/part2_outage.txt` | Agent reported an outage and did not invent a repair time. |
+| S08 — Status source unavailable | `$env:STATUS_PROFILE="status_unavailable"; python part2.py` | `outputs/part2/part2_unknown.txt` | Agent said the service state was unknown and requested details. |
+| S09 — Missing ticket details | `python -m pytest tests/test_tools.py -v` | Automated pytest output | Direct tool validation rejects a ticket with no steps tried. |
+| S10 — Use the current conversation | Same-thread Part 3 follow-up | Terminal trace | Agent recalled an earlier Wi-Fi issue within the same thread. |
+| S11 — Persist and recall after restart | Two separate `python part3.py` runs; `tests/test_memory.py` | `outputs/part3/memory_first.txt`, `memory_restart.txt`; pytest | Conversation was recalled after restarting; automated test also passed after reopening SQLite. |
+| S12 — Preference across threads without replay | `python part3.py set-pref demo-user-a language "Russian"` and new-thread demo | `outputs/part3/memory_preferences.txt`; pytest | Russian preference applied in a new thread; automated preference test passed. |
+| S13 — Do not share memory between users | Part 3 user A/B demos; `tests/test_memory.py` | `outputs/part3/memory_isolation.txt`; pytest | User B could not recall A’s history; automated isolation tests passed. |
 | S14 — Password recovery outage | Pending | Pending | Not tested yet |
