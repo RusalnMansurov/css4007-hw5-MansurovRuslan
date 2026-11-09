@@ -71,7 +71,77 @@ The original implementation gives Wi-Fi priority because its `if` condition runs
 
 ## Part 2 — Model and tools
 
-**Not yet implemented or verified.** Complete this section after a real run. Include the model/provider, direct calls of `find_instructions`, `check_service_status`, and `prepare_ticket`, a model-tool-model loop diagram, an enforced loop limit, a multi-tool trace, and different Wi-Fi operating/down/unknown outcomes. Explain who requests and who executes tools, how state changes, and how this differs from Part 1.
+### Model and provider
+
+I used the OpenAI API with `gpt-5.6-luna` through `langchain-openai` and LangGraph. The model was configured with `reasoning_effort="none"` because the initial Chat Completions request returned an HTTP 400 error when function tools were used with reasoning enabled. With this setting, the agent successfully called tools and returned responses.
+
+### Tools and data
+
+The three directly callable functions in `helpdesk_tools.py` are:
+
+1. `find_instructions(topic)` — reads the Wi-Fi or password-recovery guidance from `data/helpdesk.json` and returns its instruction ID and steps.
+2. `check_service_status(service, profile)` — reads fictional service status from `data/service_status.json`. The fixtures include `normal`, `wifi_outage`, `recovery_outage`, and `status_unavailable` profiles.
+3. `prepare_ticket(...)` — validates required information and saves a **local draft only** based on `data/ticket_template.json`; it does not submit a ticket. The tool normalizes categories and rejects some explicitly labeled secrets, such as `password: ...`.
+
+In the agent graph (`part2.py`), the model sees `find_instructions`, `get_service_status`, and `create_ticket`. The latter two are wrappers around the corresponding local functions. `STATUS_PROFILE` is selected by the application, not by the model, so the model cannot choose a different status fixture. Part 2 currently uses fixed demo user/thread IDs; user-specific memory and isolation are deferred to Part 3.
+
+### Graph and execution
+
+```text
+START -> model --(tool calls)--> tools --> model
+               \--(no tool calls)------------> END
+```
+
+The model **requests** tools by returning structured tool calls; LangGraph's `ToolNode` **executes** them and appends tool results to the message state. The model then sees those results and either requests another tool or answers. `AgentState` extends `MessagesState` with a `model_calls` counter. `MAX_MODEL_CALLS = 6` limits model invocations; the graph has a recursion limit of 20. Unlike Part 1's deterministic keyword router, Part 2 uses the LLM to choose tools and compose responses, while the tools read fixed local data.
+
+### Actual runs and traces
+
+| Test | Observed result |
+| --- | --- |
+| Direct instructions lookup | `find_instructions` returned the Wi-Fi guide and `GUIDE-WIFI`. |
+| Direct status lookup | Returned `operational` for `normal`, `outage` for `wifi_outage`, and `unknown` for `status_unavailable`. |
+| Normal Wi-Fi request | Agent called `get_service_status`, then `find_instructions`, and explained that no outage was reported. It asked for more details before preparing a draft. |
+| Wi-Fi outage | Agent called `get_service_status`, reported a campus-wide outage, and did not invent a repair time. |
+| Status unavailable | Agent called `get_service_status` and `find_instructions`, stated that it could not determine whether Wi-Fi was up or down, and requested more details. |
+| Ticket creation through the LLM | Agent called `get_service_status` and `create_ticket` and saved draft `DRAFT-57c5fbbd` with `status: draft` and `submitted: false`. |
+| Missing ticket details | Direct `prepare_ticket` call with no steps tried returned `Problem description and steps tried are required.` |
+| Explicitly labeled password | Direct `prepare_ticket` call containing `password: DEMO_SECRET_123` returned a sensitive-information error; no draft was created by that call. |
+
+**Observed multi-tool trace (normal Wi-Fi request):**
+
+```text
+model -> get_service_status(service="wifi")
+tools -> status="operational", profile="normal"
+model -> find_instructions(topic="wifi")
+tools -> instruction_id="GUIDE-WIFI", Wi-Fi steps
+model -> final response requesting missing details
+```
+
+**Observed ticket trace:**
+
+```text
+model -> get_service_status(service="wifi")
+tools -> status="operational"
+model -> create_ticket(problem_description, steps_tried, category, service_status)
+tools -> ticket_id="DRAFT-57c5fbbd", status="draft", submitted=false
+model -> confirms local draft creation
+```
+
+### Commands and evidence
+
+```powershell
+python test_tools_manual.py
+$env:STATUS_PROFILE="normal"; python part2.py
+$env:STATUS_PROFILE="wifi_outage"; python part2.py
+$env:STATUS_PROFILE="status_unavailable"; python part2.py
+python -m py_compile part2.py helpdesk_tools.py
+```
+
+Test output files were saved under `outputs/part2/` (including `part2_normal.txt`, `part2_outage.txt`, `part2_unknown.txt`, and `part2_tools_manual.txt`). A successful ticket-creation run was observed in the terminal; the ticket log's presence in the outputs directory should be verified separately before citing it as saved evidence.
+
+### Limitations
+
+All service data and instructions are fictional. Ticket drafts are local and not submitted. The sensitive-information check covers only certain explicitly labeled secret formats, not every possible secret. The maximum-call limit and all error paths have not yet been covered by automated tests. Persistent memory and per-user isolation are not implemented in Part 2.
 
 ## Part 3 — Memory
 
